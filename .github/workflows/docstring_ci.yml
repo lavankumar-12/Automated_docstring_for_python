@@ -1,0 +1,28 @@
+name: Docstring Validation CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  validate-docstrings:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run Docstring Validation
+      run: |
+        find . -name "*.py" -not -path "./.venv/*" -not -path "./__pycache__/*" | xargs -n 1 python main.py --check-only

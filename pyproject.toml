@@ -1,0 +1,4 @@
+[tool.docstring_generator]
+min_coverage = 40.0
+default_style = "google"
+validation_enabled = true

@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# App related junk
+temp_upload.py
+test_out.txt
+main_check.txt
+main_results.txt
+
+# IDE
+.vscode/
+.idea/

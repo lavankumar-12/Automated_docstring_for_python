@@ -1,16 +1,27 @@
+"""Automated Docstring Generator & Validator.
+
+This module provides tools to extract metadata from Python files using AST,
+generate docstrings in multiple styles (Google, NumPy, reST), and validate
+compliance with PEP-257 using pydocstyle.
+"""
 import ast
 import argparse
 import sys
 import io
+import tomllib
+import os
 from pydocstyle import check
+from pydocstyle.violations import conventions
 
 class DocstringGenerator:
     """Generates docstrings in various styles: Google, NumPy, reST."""
     
     def __init__(self, style="google"):
+        """Initializes the generator with a specific style."""
         self.style = style.lower()
 
     def generate(self, info):
+        """Generates a docstring for a given function or class metadata."""
         if info["type"] == "function":
             if self.style == "google":
                 return self._generate_google_func(info)
@@ -23,6 +34,7 @@ class DocstringGenerator:
         return ""
 
     def _generate_google_func(self, info):
+        """Generates a Google-style docstring for a function."""
         doc = f'"""{info["name"]} function.\n\n'
         if info["params"]:
             doc += "Args:\n"
@@ -47,6 +59,7 @@ class DocstringGenerator:
         return doc
 
     def _generate_numpy_func(self, info):
+        """Generates a NumPy-style docstring for a function."""
         doc = f'"""{info["name"]} function.\n\n'
         if info["params"]:
             doc += "Parameters\n----------\n"
@@ -71,6 +84,7 @@ class DocstringGenerator:
         return doc
 
     def _generate_rest_func(self, info):
+        """Generates a reST-style docstring for a function."""
         doc = f'"""{info["name"]} function.\n\n'
         for p, t in info["params"]:
             doc += f":param {p}: Description for {p}.\n"
@@ -92,6 +106,7 @@ class DocstringGenerator:
         return doc
 
     def _generate_class_doc(self, info):
+        """Generates a docstring for a class."""
         doc = f'"""{info["name"]} class.\n\n'
         if info["attributes"]:
             if self.style == "google":
@@ -114,11 +129,28 @@ def extract_metadata(source_code):
     tree = ast.parse(source_code)
     nodes_info = []
 
+    # Module level docstring
+    # Find the maximum line number to cover the entire file
+    max_line = 1
+    for node in ast.walk(tree):
+        if hasattr(node, 'lineno'):
+            max_line = max(max_line, getattr(node, 'end_lineno', node.lineno))
+
+    nodes_info.append({
+        "type": "module",
+        "name": "Module",
+        "lineno": 1,
+        "end_lineno": max_line,
+        "has_docstring": ast.get_docstring(tree) is not None
+    })
+
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             info = {
                 "type": "function",
                 "name": node.name,
+                "lineno": node.lineno,
+                "end_lineno": getattr(node, 'end_lineno', node.lineno),
                 "params": [],
                 "return_type": None,
                 "returns": False,
@@ -162,6 +194,8 @@ def extract_metadata(source_code):
             info = {
                 "type": "class",
                 "name": node.name,
+                "lineno": node.lineno,
+                "end_lineno": getattr(node, 'end_lineno', node.lineno),
                 "attributes": [],
                 "has_docstring": ast.get_docstring(node) is not None,
             }
@@ -180,11 +214,31 @@ def extract_metadata(source_code):
     return nodes_info
 
 
-def validate_docstrings(file_path):
-    """Validates docstrings using pydocstyle."""
+def load_config():
+    """Loads configuration from pyproject.toml."""
+    default_config = {
+        "min_coverage": 80.0,
+        "default_style": "google",
+        "validation_enabled": True
+    }
+    
+    if os.path.exists("pyproject.toml"):
+        try:
+            with open("pyproject.toml", "rb") as f:
+                data = tomllib.load(f)
+                config = data.get("tool", {}).get("docstring_generator", {})
+                return {**default_config, **config}
+        except Exception as e:
+            print(f"Warning: Could not read pyproject.toml ({e}). Using defaults.")
+    
+    return default_config
+
+
+def validate_docstrings(file_path, select=None, ignore=None):
+    """Validates docstrings using pydocstyle with selective rules."""
     violations = []
     try:
-        errors = list(check([file_path]))
+        errors = list(check([file_path], select=select, ignore=ignore))
         for error in errors:
             violations.append({
                 "code": error.code,
@@ -219,64 +273,112 @@ def run(file_path, style="google", validate=False):
     total_classes = sum(1 for n in nodes if n["type"] == "class")
     doc_funcs = sum(1 for n in nodes if n["type"] == "function" and n["has_docstring"])
     doc_classes = sum(1 for n in nodes if n["type"] == "class" and n["has_docstring"])
+    has_mod_doc = any(n["type"] == "module" and n["has_docstring"] for n in nodes)
     
-    total = total_funcs + total_classes
-    documented = doc_funcs + doc_classes
+    total = total_funcs + total_classes + 1 # +1 for module
+    documented = doc_funcs + doc_classes + (1 if has_mod_doc else 0)
     
     report = {
         "total_functions": total_funcs,
         "total_classes": total_classes,
         "documented_functions": doc_funcs,
         "documented_classes": doc_classes,
+        "has_module_doc": has_mod_doc,
         "total": total,
         "with_doc": documented,
         "missing": total - documented,
         "coverage_percentage": (documented / total * 100) if total > 0 else 100,
         "compliance": "PASS",
+        "compliance_percentage": 100.0,
         "violations": []
     }
     
     if validate:
-        violations = validate_docstrings(file_path)
+        # Pydocstyle conventions implementation
+        select_codes = None
+        if style == "google":
+            select_codes = list(conventions.google)
+        elif style == "numpy":
+            select_codes = list(conventions.numpy)
+        
+        violations = validate_docstrings(file_path, select=select_codes)
         report["violations"] = violations
+        
         if violations:
             report["compliance"] = "FAIL"
+            # Calculate how many entities have violations
+            entities_with_violations = set()
+            for v in violations:
+                for node in nodes:
+                    if node["lineno"] <= v["line"] <= node["end_lineno"]:
+                        entities_with_violations.add(node["name"])
+                        break
+            
+            compliant_entities = total - len(entities_with_violations)
+            report["compliance_percentage"] = (compliant_entities / total * 100) if total > 0 else 100.0
             
     return generated_docs, report
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Docstring Generator & Validator - Milestone 2")
+    parser = argparse.ArgumentParser(description="Docstring Generator & Validator - Milestone 3")
     parser.add_argument("file", help="Python file path")
-    parser.add_argument("--style", choices=["google", "numpy", "rest"], default="google", help="Docstring style")
-    parser.add_argument("--validate", action="store_true", help="Run PEP 257 validation")
+    parser.add_argument("--style", choices=["google", "numpy", "rest"], help="Docstring style (overrides config)")
+    parser.add_argument("--validate", action="store_true", help="Run PEP 257 validation (overrides config)")
+    parser.add_argument("--check-only", action="store_true", help="Exit with non-zero if requirements not met")
     
     args = parser.parse_args()
+    
+    config = load_config()
+    style = args.style if args.style else config["default_style"]
+    validate = args.validate or config["validation_enabled"]
+    min_cov = config["min_coverage"]
 
-    docs, report = run(args.file, style=args.style, validate=args.validate)
+    docs, report = run(args.file, style=style, validate=validate)
 
     print("\n" + "="*40)
-    print(f"MILESTONE-2 RESULTS FOR: {args.file}")
+    print(f"DOCSTRING TOOL RESULTS FOR: {args.file}")
     print("="*40)
 
-    print("\n--- Generated Docstrings ---")
-    if not docs:
-        print("Everything is already documented!")
-    else:
-        for d in docs:
-            print(f"\n[{d['type'].capitalize()}: {d['name']}]")
-            print(d['docstring'])
+    if not args.check_only:
+        print("\n--- Generated Docstrings ---")
+        if not docs:
+            print("Everything is already documented!")
+        else:
+            for d in docs:
+                print(f"\n[{d['type'].capitalize()}: {d['name']}]")
+                print(d['docstring'])
 
     print("\n--- Docstring Coverage & Compliance Report ---")
     print(f"Total Functions          : {report['total_functions']}")
     print(f"Total Classes            : {report['total_classes']}")
     print(f"Documented (Total)       : {report['with_doc']} / {report['total']}")
-    print(f"Coverage Percentage      : {report['coverage_percentage']:.2f}%")
+    print(f"Coverage Percentage      : {report['coverage_percentage']:.2f}% (Threshold: {min_cov}%)")
     print(f"PEP-257 Compliance       : {report['compliance']}")
+    print(f"Compliance Percentage    : {report['compliance_percentage']:.2f}%")
+    print(f"Total Violations         : {len(report['violations'])}")
 
-    if args.validate and report['violations']:
+    if (args.validate or validate) and report['violations']:
         print("\n--- Validation Errors (pydocstyle) ---")
         for v in report['violations']:
             print(f"Line {v['line']} [{v['code']}]: {v['message']}")
 
     print("\n" + "="*40)
+
+    # CI/Hook checks
+    failed = False
+    if report['coverage_percentage'] < min_cov:
+        print(f"ERROR: Coverage {report['coverage_percentage']:.2f}% is below threshold {min_cov}%")
+        failed = True
+    
+    if validate and report['compliance'] == "FAIL":
+        print("ERROR: PEP-257 validation failed!")
+        failed = True
+    
+    if failed:
+        if args.check_only:
+            sys.exit(1)
+        else:
+            print("Status: FAILED (Commit would be blocked in pre-commit hook)")
+    else:
+        print("Status: PASSED")
